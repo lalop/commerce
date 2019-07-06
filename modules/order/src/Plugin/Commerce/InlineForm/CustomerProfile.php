@@ -151,16 +151,6 @@ class CustomerProfile extends EntityInlineFormBase {
     // Allows a widget to vary when used for billing versus shipping purposes.
     // Available in hook_field_widget_form_alter() via $context['form'].
     $inline_form['#instance_id'] = $this->configuration['instance_id'];
-    // Determine the name of the triggering element, if the form was rebuilt
-    // by an element from the current inline form.
-    $triggering_element_name = '';
-    $triggering_element = $form_state->getTriggeringElement();
-    if ($triggering_element) {
-      $parents = array_slice($triggering_element['#parents'], 0, count($inline_form['#parents']));
-      if ($inline_form['#parents'] === $parents) {
-        $triggering_element_name = end($triggering_element['#parents']);
-      }
-    }
 
     assert($this->entity instanceof ProfileInterface);
     $profile_type_id = $this->entity->bundle();
@@ -221,38 +211,14 @@ class CustomerProfile extends EntityInlineFormBase {
     // Copy field values from the address book profile to the actual profile.
     if ($address_book_profile) {
       $this->entity->populateFromProfile($address_book_profile);
-      // Remember the ID of the source address book profile.
-      if ($address_book_profile->id() == $this->entity->id()) {
-        // The _original profile is being edited.
-        $this->entity->setData('address_book_profile_id', $address_book_profile->getData('address_book_profile_id'));
-      }
-      elseif (!$address_book_profile->isNew()) {
+      $this->entity->unsetData('copy_to_address_book');
+      $this->entity->unsetData('address_book_profile_id');
+      if (!$address_book_profile->isNew()) {
         $this->entity->setData('address_book_profile_id', $address_book_profile->id());
       }
-      else {
-        $this->entity->unsetData('address_book_profile_id');
-      }
-      // Remove any previous values from form input, otherwise the new
-      // default values won't be shown.
-      NestedArray::setValue($form_state->getUserInput(), $inline_form['#parents'], NULL);
     }
 
-    $render_parents = array_merge($inline_form['#parents'], ['render']);
-    if ($triggering_element_name == 'select_address') {
-      // Reset the render flag to re-evaluate the newly selected profile.
-      $form_state->set($render_parents, NULL);
-    }
-    elseif ($triggering_element_name == 'edit_button') {
-      // The edit button was clicked, turn off profile rendering.
-      $form_state->set($render_parents, FALSE);
-    }
-    $render = $form_state->get($render_parents);
-    if (!isset($render)) {
-      $render = !$this->isProfileIncomplete($this->entity);
-      $form_state->set($render_parents, $render);
-    }
-
-    if ($render) {
+    if ($this->shouldRender($inline_form, $form_state)) {
       $view_builder = $this->entityTypeManager->getViewBuilder('profile');
       $inline_form['rendered'] = $view_builder->view($this->entity);
       $inline_form['edit_button'] = [
@@ -284,42 +250,42 @@ class CustomerProfile extends EntityInlineFormBase {
 
       $edit = $address_book_profile ? !$address_book_profile->isNew() : !$this->entity->isNew();
       $update_on_copy = (bool) $this->entity->getData('address_book_profile_id');
-      $default_value = TRUE;
-      if ($this->configuration['admin']) {
-        // Admins are primarily modifying the parent entity (e.g. an order),
-        // modifying global customer data needs to be opt-in.
-        $default_value = FALSE;
+      if ($allows_multiple) {
+        // The copy checkbox is:
+        // - Shown and checked for customers adding a new address.
+        // - Shown and unchecked for admins adding a new address.
+        // - Hidden and checked for customers and admins editing an address
+        //   book profile which is still in sync with the current profile.
+        // - Hidden and unchecked if the address book profile is no longer in
+        //   sync (determined and done via the logic in buildOptions().
+        $default_value = TRUE;
+        if ($this->configuration['admin'] && !$edit) {
+          $default_value = FALSE;
+        }
+        if ($edit && !$update_on_copy) {
+          // The profile was originally not copied to the address book,
+          // preserve that decision.
+          $default_value = FALSE;
+        }
+        $visible = !$default_value || !$update_on_copy;
       }
-      elseif ($allows_multiple && $edit && !$update_on_copy) {
-        // The profile was originally not added to the address book, don't
-        // add it on edit either.
-        $default_value = FALSE;
+      else {
+        // The copy checkbox is:
+        // - Hidden and checked for customers, since the address book is always
+        //   supposed to reflect customer's last entered address.
+        // - Shown and unchecked for admins, who need to opt-in to copying.
+        $default_value = !$this->configuration['admin'];
+        $visible = $this->configuration['admin'];
       }
 
       $inline_form['copy_to_address_book'] = [
         '#type' => 'checkbox',
         '#title' => $this->getCopyLabel($profile_type_id, $update_on_copy),
         '#default_value' => (bool) $this->entity->getData('copy_to_address_book', $default_value),
-        // The checkbox is hidden when the value is obvious, to simplify
-        // the UI. For example, the customer clicking the "Edit" button
-        // communicates enough intent for us to assume that updating the
-        // address book is desired.
-        '#access' => FALSE,
+        // Anonymous customers don't have an address book until they register
+        // or log in, so the checkbox is not shown to them, to avoid confusion.
+        '#access' => $customer->isAuthenticated() && $visible,
       ];
-      // Anonymous customers don't have an address book until they register
-      // or log in, so the checkbox is not shown to them, but the flag itself
-      // still defaults to TRUE, to ensure copying happens on register/login.
-      if ($customer->isAuthenticated()) {
-        if ($this->configuration['admin']) {
-          // Administrators need to opt-in to modifying global customer data.
-          $inline_form['copy_to_address_book']['#access'] = TRUE;
-        }
-        elseif ($allows_multiple && !$update_on_copy) {
-          // Allow customers to use a one-off address.
-          // Covers adding a new address, and editing a new address.
-          $inline_form['copy_to_address_book']['#access'] = TRUE;
-        }
-      }
     }
 
     return $inline_form;
@@ -375,12 +341,78 @@ class CustomerProfile extends EntityInlineFormBase {
   }
 
   /**
+   * Loads a user entity for the given user ID.
+   *
+   * Falls back to the anonymous user if the user ID is empty or unknown.
+   *
+   * @param string $uid
+   *   The user ID.
+   *
+   * @return \Drupal\user\UserInterface
+   *   The user entity.
+   */
+  protected function loadUser($uid) {
+    $customer = User::getAnonymousUser();
+    if (!empty($uid)) {
+      $user_storage = $this->entityTypeManager->getStorage('user');
+      /** @var \Drupal\user\UserInterface $user */
+      $user = $user_storage->load($uid);
+      if ($user) {
+        $customer = $user;
+      }
+    }
+    return $customer;
+  }
+
+  /**
+   * Determines whether the current profile should be shown rendered.
+   *
+   * @param array $inline_form
+   *   The inline form.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   The form state of the complete form.
+   *
+   * @return bool
+   *   TRUE if the profile should be shown rendered, FALSE otherwise.
+   */
+  protected function shouldRender(array $inline_form, FormStateInterface $form_state) {
+    // Determine the name of the triggering element, if the form was rebuilt
+    // by an element from the current inline form.
+    $triggering_element_name = '';
+    $triggering_element = $form_state->getTriggeringElement();
+    if ($triggering_element) {
+      $parents = array_slice($triggering_element['#parents'], 0, count($inline_form['#parents']));
+      if ($inline_form['#parents'] === $parents) {
+        $triggering_element_name = end($triggering_element['#parents']);
+      }
+    }
+
+    $render_parents = array_merge($inline_form['#parents'], ['render']);
+    if ($triggering_element_name == 'select_address') {
+      // Reset the render flag to re-evaluate the newly selected profile.
+      $form_state->set($render_parents, NULL);
+    }
+    elseif ($triggering_element_name == 'edit_button') {
+      // The edit button was clicked, turn off profile rendering.
+      $form_state->set($render_parents, FALSE);
+    }
+    $render = $form_state->get($render_parents);
+    if (!isset($render)) {
+      assert($this->entity instanceof ProfileInterface);
+      $render = !$this->isProfileIncomplete($this->entity);
+      $form_state->set($render_parents, $render);
+    }
+
+    return $render;
+  }
+
+  /**
    * Prepares the profile form.
    *
    * @param array $profile_form
    *   The profile form.
    * @param \Drupal\Core\Form\FormStateInterface $form_state
-   *   The current state of the form.
+   *   The form state of the complete form.
    *
    * @return array
    *   The prepared profile form.
@@ -408,30 +440,6 @@ class CustomerProfile extends EntityInlineFormBase {
       }
     }
     return $profile_form;
-  }
-
-  /**
-   * Loads a user entity for the given user ID.
-   *
-   * Falls back to the anonymous user if the user ID is empty or unknown.
-   *
-   * @param string $uid
-   *   The user ID.
-   *
-   * @return \Drupal\user\UserInterface
-   *   The user entity.
-   */
-  protected function loadUser($uid) {
-    $customer = User::getAnonymousUser();
-    if (!empty($uid)) {
-      $user_storage = $this->entityTypeManager->getStorage('user');
-      /** @var \Drupal\user\UserInterface $user */
-      $user = $user_storage->load($uid);
-      if ($user) {
-        $customer = $user;
-      }
-    }
-    return $customer;
   }
 
   /**
@@ -491,14 +499,11 @@ class CustomerProfile extends EntityInlineFormBase {
    *   The address book profile.
    *
    * @return string
-   *   The option ID. A profile ID, or a special value ('_original', '_new').
+   *   The option ID. A profile ID, or '_new'.
    */
   protected function selectOptionForProfile(ProfileInterface $address_book_profile) {
     if ($address_book_profile->isNew()) {
       $option_id = '_new';
-    }
-    elseif ($address_book_profile->id() == $this->entity->id()) {
-      $option_id = '_original';
     }
     else {
       $option_id = $address_book_profile->id();
@@ -513,8 +518,8 @@ class CustomerProfile extends EntityInlineFormBase {
    * @param string $option_id
    *   The option ID. A profile ID, or a special value ('_original', '_new').
    *
-   * @return \Drupal\profile\Entity\ProfileInterface
-   *   The profile.
+   * @return \Drupal\profile\Entity\ProfileInterface|null
+   *   The profile, or NULL if none found.
    */
   protected function getProfileForOption($option_id) {
     $profile_storage = $this->entityTypeManager->getStorage('profile');
@@ -526,7 +531,9 @@ class CustomerProfile extends EntityInlineFormBase {
       ]);
     }
     elseif ($option_id == '_original') {
-      $address_book_profile = $profile_storage->loadUnchanged($this->entity->id());
+      // The inline form is built with the original $this->>entity,
+      // there is no need to update it in this case.
+      $address_book_profile = NULL;
     }
     else {
       assert(is_numeric($option_id));

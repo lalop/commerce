@@ -59,8 +59,6 @@ class OrderAdminTest extends OrderWebDriverTestBase {
 
   /**
    * Tests creating an order.
-   *
-   * @group test
    */
   public function testCreateOrder() {
     // Create an order through the add form.
@@ -73,7 +71,7 @@ class OrderAdminTest extends OrderWebDriverTestBase {
     ];
     $this->submitForm($edit, t('Create'));
 
-    $this->assertRenderedAddress($this->defaultAddress);
+    $this->assertRenderedAddress($this->defaultAddress, 'billing_profile[0][profile]');
     // Test that commerce_order_test_field_widget_form_alter() has the expected
     // outcome.
     $this->assertSame([], \Drupal::state()->get("commerce_order_test_field_widget_form_alter"));
@@ -127,6 +125,7 @@ class OrderAdminTest extends OrderWebDriverTestBase {
     $this->assertCount(1, $order->getAdjustments());
     $billing_profile = $order->getBillingProfile();
     $this->assertEquals($this->defaultAddress, array_filter($billing_profile->get('address')->first()->toArray()));
+    $this->assertEquals($this->defaultProfile->id(), $billing_profile->getData('address_book_profile_id'));
   }
 
   /**
@@ -190,11 +189,11 @@ class OrderAdminTest extends OrderWebDriverTestBase {
     $this->assertSession()->optionExists('adjustments[2][type]', 'Custom');
     $this->assertSession()->optionNotExists('adjustments[2][type]', 'Test order adjustment type');
 
-    $this->assertRenderedAddress($address);
+    $this->assertRenderedAddress($address, 'billing_profile[0][profile]');
     // Select the default profile instead.
     $this->getSession()->getPage()->fillField('billing_profile[0][profile][select_address]', $this->defaultProfile->id());
     $this->waitForAjaxToFinish();
-    $this->assertRenderedAddress($this->defaultAddress);
+    $this->assertRenderedAddress($this->defaultAddress, 'billing_profile[0][profile]');
     // Edit the default profile and change the street.
     $this->getSession()->getPage()->pressButton('billing_edit');
     $this->waitForAjaxToFinish();
@@ -202,16 +201,19 @@ class OrderAdminTest extends OrderWebDriverTestBase {
       $prefix = 'billing_profile[0][profile][address][0][address]';
       $this->assertSession()->fieldValueEquals($prefix . '[' . $property . ']', $value);
     }
-    $this->assertSession()->checkboxNotChecked('billing_profile[0][profile][copy_to_address_book]');
-    $this->assertSession()->pageTextContains("Also update the address in the customer's address book");
+    // The copy checkbox should be hidden and checked.
+    $this->assertSession()->fieldNotExists('billing_profile[0][profile][copy_to_address_book]');
     $this->submitForm([
       'billing_profile[0][profile][address][0][address][address_line1]' => '10 Drupal Ave',
     ], 'Save');
 
     /** @var \Drupal\profile\Entity\ProfileInterface $profile */
     $profile = $this->reloadEntity($profile);
+    $this->defaultProfile = $this->reloadEntity($this->defaultProfile);
     $expected_address = ['address_line1' => '10 Drupal Ave'] + $this->defaultAddress;
     $this->assertEquals($expected_address, array_filter($profile->get('address')->first()->toArray()));
+    $this->assertEquals($expected_address, array_filter($this->defaultProfile->get('address')->first()->toArray()));
+    $this->assertEquals($this->defaultProfile->id(), $profile->getData('address_book_profile_id'));
   }
 
   /**

@@ -496,7 +496,7 @@ class CustomerProfileTest extends OrderWebDriverTestBase {
     $this->assertSession()->checkboxNotChecked('profile[copy_to_address_book]');
     $this->assertSession()->pageTextContains("Save to the customer's address book");
     $this->submitForm([
-      'profile[copy_to_address_book]' => '1',
+      'profile[copy_to_address_book]' => TRUE,
     ], 'Submit');
     $this->assertSession()->pageTextContains('The street is "38 Rue du Sentier" and the country code is FR.');
 
@@ -515,11 +515,10 @@ class CustomerProfileTest extends OrderWebDriverTestBase {
     foreach ($this->frenchAddress as $property => $value) {
       $this->assertSession()->fieldValueEquals("profile[address][0][address][$property]", $value);
     }
-    $this->assertSession()->checkboxNotChecked('profile[copy_to_address_book]');
-    $this->assertSession()->pageTextContains("Also update the address in the customer's address book");
+    // The copy checkbox should be hidden and checked.
+    $this->assertSession()->fieldNotExists('profile[copy_to_address_book]');
     $this->submitForm([
       'profile[address][0][address][address_line1]' => '37 Rue du Sentier',
-      'profile[copy_to_address_book]' => TRUE,
     ], 'Submit');
     $this->assertSession()->pageTextContains('The street is "37 Rue du Sentier" and the country code is FR.');
 
@@ -757,6 +756,11 @@ class CustomerProfileTest extends OrderWebDriverTestBase {
    * Tests the address book in "single" mode, for administrators.
    */
   public function testSingleAdministrator() {
+    /** @var \Drupal\profile\Entity\ProfileTypeInterface $profile_type */
+    $profile_type = ProfileType::load('customer');
+    $profile_type->setMultiple(FALSE);
+    $profile_type->save();
+
     // Start from a one-off profile, then add it to the address book.
     $profile = Profile::create([
       'type' => 'customer',

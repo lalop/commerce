@@ -10,13 +10,6 @@ use Drupal\Tests\commerce\FunctionalJavascript\CommerceWebDriverTestBase;
 abstract class OrderWebDriverTestBase extends CommerceWebDriverTestBase {
 
   /**
-   * The country list.
-   *
-   * @var array
-   */
-  protected $countryList;
-
-  /**
    * The variation to test against.
    *
    * @var \Drupal\commerce_product\Entity\ProductVariation
@@ -52,9 +45,6 @@ abstract class OrderWebDriverTestBase extends CommerceWebDriverTestBase {
   protected function setUp() {
     parent::setUp();
 
-    $country_repository = $this->container->get('address.country_repository');
-    $this->countryList = $country_repository->getList();
-
     // Create a product variation.
     $this->variation = $this->createEntity('commerce_product_variation', [
       'type' => 'default',
@@ -73,24 +63,6 @@ abstract class OrderWebDriverTestBase extends CommerceWebDriverTestBase {
       'stores' => [$this->store],
       'variations' => [$this->variation],
     ]);
-  }
-
-  /**
-   * Asserts that the given address is rendered on the page.
-   *
-   * @param array $address
-   *   The address.
-   */
-  protected function assertRenderedAddress(array $address) {
-    $page = $this->getSession()->getPage();
-    foreach ($address as $property => $value) {
-      if ($property == 'country_code') {
-        $value = $this->countryList[$value];
-      }
-      $this->assertContains($value, $page->find('css', 'p.address')->getText());
-      $this->assertSession()->fieldNotExists("profile[address][0][address][$property]");
-    }
-    $this->assertSession()->fieldNotExists('profile[copy_to_address_book]');
   }
 
 }
